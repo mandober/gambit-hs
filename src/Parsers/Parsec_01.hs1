@@ -1,0 +1,279 @@
+{-# LANGUAGE GeneralizedNewtypeDeriving #-}
+{-# LANGUAGE EmptyDataDecls #-}
+{-# LANGUAGE FlexibleInstances #-}
+{-# LANGUAGE FlexibleContexts #-}
+{-# LANGUAGE TypeSynonymInstances #-}
+
+module Parsers.Parsec_01 where
+
+{-
+    GeneralizedNewtypeDeriving
+    Enable newtype deriving.
+
+    EmptyDataDecls
+    Allow definition of empty data types.
+
+    ImplicitParams
+    Enable Implicit Parameters. Implies FlexibleContexts & FlexibleInstances.
+
+    FlexibleInstances
+    Enable. Implies TypeSynonymInstances. Implied by ImplicitParams.
+
+    FlexibleContexts
+    Enable flexible contexts. Implied by ImplicitParams.
+
+    TypeSynonymInstances
+    Enable type synonyms in instance heads. Implied by FlexibleInstances.
+
+-}
+
+
+{-
+Monadic Parser Combinators
+
+http://www.cs.nott.ac.uk/~pszgmh/monparsing.pdf
+
+2. COMBINATOR PARSERS
+=====================
+We define a type for parsers, 3 primitive parsers and 2 primitive combinators for building larger parsers.
+
+2.1 THE TYPE OF PARSERS
+=======================
+We start by thinking of a PARSER AS A FUNCTION that takes a string of chars as
+input and yields some kind of tree as result, where the tree makes explicit the grammatical structure of the string, e.g. AST
+
+type Parser = String -> Tree
+
+However, a parser might not consume all of its input string, so rather than the result of a parser being just a tree, we also return the unconsumed suffix of the input string. Thus we modify our type of parsers as follows:
+
+type Parser = String -> (Tree,String)
+
+Similarly, a parser might fail on its input string. Rather than just reporting a run-time error if this happens, we choose to have parsers return a list of pairs rather than a single pair, with the convention that the empty list denotes failure of a parser, and a singleton list denotes success:
+
+type Parser = String -> [(Tree,String)]
+
+Having an explicit representation of failure and returning the unconsumed part of the input string makes it possible to define combinators for building up parsers piecewise from smaller parsers. Returning a list of results opens up the possibility of returning more than one result if the input string can be parsed in more than one way, which may be the case if the underlying grammar is ambiguous.
+
+Finally, different parsers will likely return different kinds of trees, so it is useful to abstract on the specific type Tree of trees, and make the type of result values into a parameter of the Parser type:
+
+type Parser a = String -> [(a,String)]
+
+
+2.2 PRIMITIVE PARSERS
+=====================
+These 3 primitive parsers are the building blocks of COMBINATOR PARSING:
+
+result
+    The result parser always succeeds without consuming any
+    of the input string, and returns the single result v.
+
+zero
+    The zero parser always fails, regardless of the input string.
+
+item
+    The item parser consumes the first character successfully
+    if the input string is non-empty, and fails otherwise.
+
+
+2.3 PARSER COMBINATORS
+======================
+The 3 primitive parsers are not very useful in themselves so we consider how they can be glued together to form more useful parsers. We take a hint from the BNF notation for specifying grammars, in which larger grammars are built up piecewise from smaller grammars using a sequencing operator (denoted by juxtaposition) and a choice operator (denoted by a vertical bar).
+
+We define corresponding operators for combining parsers, so the structure of our parsers closely follows the structure of the underlying grammars.
+
+In earlier (non-monadic) accounts of combinator parsing, sequencing of parsers was usually captured by a combinator
+
+seq :: Parser a -> Parser b -> Parser (a,b)
+p `seq` q = \inp -> [((v,w),inp'') | (v,inp') <- p inp, (w,inp'') <- q inp']
+
+that applies one parser after another, with the results from the two parsers being combined as pairs. At first sight, the seq combinator might seem a natural
+composition primitive. In practice, however, using seq leads to parsers with nested tuples as results, which are messy to manipulate.
+
+bind
+    The problem of nested tuples can be avoided by adopting a MONADIC SEQUENCING COMBINATOR, `bind`, which integrates the sequencing of parsers with the processing of their result values:
+
+    bind :: Parser a -> (a -> Parser b) -> Parser b
+    p `bind` f = \inp -> concat [f v inp' | (v,inp') <- p inp]
+
+    First the parser `p` is applied to the input string, `p inp`, (right most expr) yielding a list of `(value,string)` pairs. Since `f` is a function that takes a value and returns a parser, it can be applied to each value (and unconsumed input string) in turn. This results in a list of lists of `(value,string)` pairs, that can then be flattened to a single list using `concat`.
+
+    The bind combinator avoids the problem of nested tuples of results because the results of the first parser are made directly available for processing by the second, rather than being paired with other results to be processed later on.
+
+    A typical parser built using bind has the following structure:
+    p1 `bind` \x1 ->
+    p2 `bind` \x2 ->
+    ...
+    pn `bind` \xn ->
+    result (f x1 x2 ... xn)
+
+    Read:apply parser p1 and call its result value x1
+    then apply parser p2 and call its result value x2,...,
+    then apply parser pn and call its result value xn
+    finally, combine all the results into a single value by applying the fn f
+
+    For example, the `seq` combinator can be defined in terms of bind, but not the other way around:
+    p `seq` q = p `bind` \x ->
+                q `bind` \y ->
+                result (x,y)
+
+
+sat
+    Using the bind combinator, we can now define simple but useful parsers: `item` parser consumes a single character unconditionally; in practice, we are only interested in consuming some specific characters, so we can use `item` to define a combinator `sat` that takes a predicate and yields a parser that consumes a single character if it satisfies the predicate (and fails otherwise):
+
+    sat :: (Char -> Bool) -> Parser Char
+    sat p = item `bind` (\x -> if p x then result x else zero)
+
+    Note that if `item` fails (that is, if the input string is empty),
+    then so does `sat p`, since it can be observed that
+        zero `bind` f = zero
+    for all functions f of the appropriate type. This equation is not specific to parsers - it holds for any arbitrary monad with a zero.
+
+
+char, digit, lower, upper
+    Using sat, we can define parsers for specific characters like single digits, lower-case letters, upper-case letters:
+
+    char :: Char -> Parser Char
+    char x = sat (\y -> x == y)
+
+    digit :: Parser Char
+    digit = sat (\x -> '0' <= x && x <= '9')
+
+    lower :: Parser Char
+    lower = sat (\x -> 'a' <= x && x <= 'z')
+
+    upper :: Parser Char
+    upper = sat (\x -> 'A' <= x && x <= 'Z')
+
+
+twoLowerChars
+    As another example of using bind, consider the parser that accepts 2 lower-case letters in sequence, returning a string of length two:
+
+    twoLowerChars =
+        lower `bind` \x ->
+        lower `bind` \y ->
+        result [x,y]
+
+    twoLowerChars "abcd"   --- [("ab","cd")]
+    twoLowerChars "aBcd"   --- []
+
+    Of course, the two-letter parser can be generalised to
+    a parser for arbitrary strings of lower-case letters.
+
+
+plus
+    Since length of string to be parsed cannot be predicted in advance, such a parser will be defined recursively, using a CHOICE OPERATOR to decide between:
+    - parsing a single letter and recursing, or
+    - parsing nothing further and terminating
+
+    A suitable CHOICE COMBINATOR for parsers, `plus`, is defined as follows:
+
+    plus :: Parser a -> Parser a -> Parser a
+    p `plus` q = \inp -> (p inp ++ q inp)
+
+
+    Both parsers, p and q, are applied to the same input string, and their result lists are concatenated into a single result list.
+
+    It is not required that p and q accept disjoint sets of strings: if they both succeed then more than one result value will be returned, reflecting the different ways input string can be parsed. Now our parsers can be combined into letters and alpha-numerics parsers:
+
+    letter :: Parser Char
+    letter = lower `plus` upper
+
+    alphanum :: Parser Char
+    alphanum = letter `plus` digit
+
+    A parser for words (strings of letters) is defined as:
+
+    word :: Parser String
+    word = neWord `plus` result "" where
+        neWord = letter `bind` \x  ->
+                 word   `bind` \xs ->
+                 result (x:xs)
+
+    That is, `word` either parses a non-empty word (a single letter followed by a word, using a recursive call to `word`), in which case the 2 results are combined to form a string, or parses nothing and returns the empty string.
+
+    For example, applying `word` to the input: "Yes!" gives the result:
+        [("Yes","!"),("Ye","s!"), ("Y","es!"), ("","Yes!")]
+
+    The first result, ("Yes","!"), is the expected result: the string of letters, "Yes", has been consumed, and the unconsumed input is "!".
+    In the subsequent results a decreasing number of letters are consumed.
+
+    This behaviour arises because the choice operator `plus` is non-deterministic: both alternatives can be explored, even if the first alternative is successful. Thus, at each application of `letter`, there is always the option to just finish parsing, even if there are still letters left to be consumed from the start of the input.
+
+
+-}
+import Data.Char
+
+type Parser a = String -> [(a,String)]
+
+
+result :: a -> Parser a
+result v = \inp -> [(v,inp)]
+
+zero :: Parser a
+zero = \inp -> []
+
+item :: Parser Char
+item [] = []
+item (x:xs) = [(x,xs)]
+
+
+-- bind :: (Monad f) => f a -> (a -> f b) -> f b
+bind :: Parser a -> (a -> Parser b) -> Parser b
+p `bind` f = \inp -> concat [f v inp' | (v,inp') <- p inp]
+
+-- instance Monad Parser where
+    -- (>>=) = bind
+    -- return = result
+
+-- satisfy :: Stream s m Char => (Char -> Bool) -> ParsecT s u m Char
+sat :: (Char -> Bool) -> Parser Char
+sat p = item `bind` (\x -> if p x then result x else zero)
+
+
+char :: Char -> Parser Char
+char x = sat (\y -> x == y)
+
+digit :: Parser Char
+digit = sat (\x -> isDigit x)
+
+lower :: Parser Char
+lower = sat (\x -> isLower x)
+
+upper :: Parser Char
+upper = sat (\x -> isUpper x)
+
+-- Testing char parsers
+_ = upper "P"       -- [('P',"")]
+_ = upper "Poo"     -- [('P',"oo")]
+_ = upper "pee"     -- []
+_ = lower "pee"     -- [('p',"ee")]
+_ = digit "66pee"   -- [('6',"6pee")]
+
+-- example parser that eats exactly 2 lower-case chars
+twoLowerChars :: Parser [Char]
+twoLowerChars =
+    lower `bind` \x ->
+        lower `bind` \y ->
+            result [x,y]
+
+-- Testing char pair parser
+_ = twoLowerChars "abcd"       --- [("ab","cd")]
+_ = twoLowerChars "aBcd"       --- []
+
+
+plus :: Parser a -> Parser a -> Parser a
+p `plus` q = \inp -> (p inp ++ q inp)
+
+letter :: Parser Char
+letter = lower `plus` upper
+
+alphanum :: Parser Char
+alphanum = letter `plus` digit
+
+word :: Parser String
+word = neWord `plus` result "" where
+    neWord = letter `bind` \x  ->
+             word   `bind` \xs ->
+             result (x:xs)
+
+-- ===========================================================================
